@@ -34,8 +34,8 @@ codenames_debian=(sid jessie wheezy)
 architectures=(amd64)
 
 # GPG key
-signing_key='XXXX'
-signing_pass='XXXX'
+signing_key=''
+signing_pass=''
 
 # Setting up logfile
 WORK_HOME="$(cd "$(dirname "$0")" ; pwd -P)"
@@ -125,37 +125,18 @@ update_changelog() {
   local changelog_file="$1"
   local package="$2"
   local version="$3"
-  local codename="$4"
 
   local debian_revision
   debian_revision="$(dpkg-parsechangelog --show-field Version -l "$changelog_file" | sed 's/.*-//g')"
+
+  local debdist
+  local check_codenames=("${codenames_debian[@]}" "${codenames_ubuntu[@]}")
 
   local changelog_file_tmp="${changelog_file}.tmp"
 
   if [ ! -e "$1" ] ; then
     echo "Error: Changelog file $1 does not exist" | write_log
     exit 1
-  fi
-
-  local check_codenames=("${codenames_debian[@]}" "${codenames_ubuntu[@]}")
-
-  if ! contains_element "$codename" "${check_codenames[@]}" ; then
-    echo "Error: Codename $codename not contained in codenames for Debian or Ubuntu" | write_log
-    exit 1
-  fi
-
-  # For Debian
-  if [ "$codename" = "sid" ]; then
-    local debdist="unstable"
-  elif [ "$codename" = "jessie" ]; then
-    local debdist="testing"
-  elif [ "$codename" = "wheezy" ]; then
-    local debdist="stable"
-  fi
-
-  # For Ubuntu
-  if contains_element "$codename" "${codenames_ubuntu[@]}"; then
-    local debdist=$codename
   fi
 
   # Modifying file
@@ -177,7 +158,29 @@ update_changelog() {
 
   while read -r line; do
     if [[ "$line" =~ $regex1 ]]; then
-      line="${package} (${version}~${codename}-${debian_revision}) ${debdist}; urgency=low"
+      line="${package} (${version}-${debian_revision})"
+
+      for codename in "${build_codenames[@]}"; do
+        if ! contains_element "$codename" "${check_codenames[@]}" ; then
+          echo "Error: Codename $codename not contained in codenames for Debian or Ubuntu" | write_log
+          exit 1
+        fi
+
+        # For Debian
+        if [ "$codename" = "sid" ]; then
+          debdist="unstable"
+        elif [ "$codename" = "jessie" ]; then
+          debdist="testing"
+        elif [ "$codename" = "wheezy" ]; then
+          debdist="stable"
+        else
+          debdist="$codename"
+        fi
+
+        line="${line} ${debdist}"
+      done
+
+      line="${line}; urgency=low"
     fi
 
     if [[ "$line" =~ $regex2 ]] && [ $last_date_changed -eq 0 ]; then
@@ -189,6 +192,8 @@ update_changelog() {
   done < "$changelog_file"
 
   unset IFS
+
+  cat "$changelog_file_tmp"
 
   mv "$changelog_file_tmp" "$changelog_file"
 }
@@ -242,11 +247,11 @@ git_source() {
     rm -rf "${WORK_HOME}/${package}/${package}-${package_version}"
 
     mkdir -p "${WORK_HOME}/${package}/${package}-${package_version}"
-    git -C "$repo" archive --format tar "$branch" -o "${WORK_HOME}/${package}/${package}_${package_version}.orig.tar.gz"
+    git -C "$repo" archive --format tar "$branch" | gzip > "${WORK_HOME}/${package}/${package}_${package_version}.orig.tar.gz"
     tar -xf "${WORK_HOME}/${package}/${package}_${package_version}.orig.tar.gz" -C "${WORK_HOME}/${package}/${package}-${package_version}"
     cp -pr "${WORK_HOME}/${package}/${package}-${package_version}/contrib/debian-packages/${package}/debian" "${WORK_HOME}/${package}/${package}-${package_version}/debian"
 
-    echo "$package_version" > "${WORK_HOME}/${package}/${package}-${package_version}/VERSION"
+    echo "$package_version" > "${WORK_HOME}/${package}/${package}-${package_version}/debian/VERSION"
   done
 }
 
@@ -351,7 +356,7 @@ build_packages() {
       for arch in "${architectures[@]}"; do
         for src in "${WORK_HOME}/${package}"/*; do
 
-          ossec_version_file="${src}/VERSION"
+          ossec_version_file="${src}/debian/VERSION"
           if [[ ! -f "$ossec_version_file" ]]; then
             # Not a source dir
             continue
@@ -370,7 +375,7 @@ build_packages() {
           fi
 
           # Updating changelog file with new codename, date and debdist.
-          if update_changelog "$changelog_file" "$package" "$ossec_version" "$codename"; then
+          if update_changelog "$changelog_file" "$package" "$ossec_version"; then
             echo " + Changelog file ${changelog_file} updated for $package ${codename}-${arch}" | write_log
           else
             echo "Error: Changelog file ${changelog_file} for $package ${codename}-${arch} could not be updated" | write_log
@@ -379,9 +384,9 @@ build_packages() {
 
           # Setting up global variable package_version, used for deb_file and changes_file
           read_package_version "${changelog_file}"
-          local deb_file="${package}_${ossec_version}-${package_version}${codename}_${arch}.deb"
-          local changes_file="${package}_${ossec_version}-${package_version}${codename}_${arch}.changes"
-          local dsc_file="${package}_${ossec_version}-${package_version}${codename}.dsc"
+          local deb_file="${package}_${ossec_version}-${package_version}_${arch}.deb"
+          local changes_file="${package}_${ossec_version}-${package_version}_${arch}.changes"
+          local dsc_file="${package}_${ossec_version}-${package_version}.dsc"
           local results_dir="/var/cache/pbuilder/${codename}-${arch}/result/${package}"
 
           # Creating results directory if it does not exist
@@ -426,32 +431,33 @@ build_packages() {
             exit 1
           fi
 
-          sudo /usr/bin/expect -c "
-          spawn sudo debsign --re-sign -k${signing_key} ${results_dir}/${changes_file}
-          expect -re \".*Enter passphrase:.*\"
-          send \"${signing_pass}\r\"
-          expect -re \".*Enter passphrase:.*\"
-          send \"${signing_pass}\r\"
-          expect -re \".*Successfully signed dsc and changes files.*\"
-          "
+          if [[ -n "$signing_key" ]] && [[ -n "$signing_pass" ]]; then
+            sudo /usr/bin/expect -c "
+            spawn sudo debsign --re-sign -k${signing_key} ${results_dir}/${changes_file}
+            expect -re \".*Enter passphrase:.*\"
+            send \"${signing_pass}\r\"
+            expect -re \".*Enter passphrase:.*\"
+            send \"${signing_pass}\r\"
+            expect -re \".*Successfully signed dsc and changes files.*\"
+            "
 
-          if [ $? -eq 0 ] ; then
-            echo " + Successfully signed Debian package ${changes_file} ${codename}-${arch}" | write_log
-          else
-            echo "Error: Could not sign Debian package ${changes_file} ${codename}-${arch}" | write_log
-            exit 1
-          fi
+            if [ $? -eq 0 ] ; then
+              echo " + Successfully signed Debian package ${changes_file} ${codename}-${arch}" | write_log
+            else
+              echo "Error: Could not sign Debian package ${changes_file} ${codename}-${arch}" | write_log
+              exit 1
+            fi
 
-          # Verifying signed changes and dsc files
-          if sudo gpg --verify "${results_dir}/${dsc_file}" && sudo gpg --verify "${results_dir}/${changes_file}" ; then
-            echo " + Successfully verified GPG signature for files ${dsc_file} and ${changes_file}" | write_log
-          else
-            echo "Error: Could not verify GPG signature for ${dsc_file} and ${changes_file}" | write_log
-            exit 1
+            # Verifying signed changes and dsc files
+            if sudo gpg --verify "${results_dir}/${dsc_file}" && sudo gpg --verify "${results_dir}/${changes_file}" ; then
+              echo " + Successfully verified GPG signature for files ${dsc_file} and ${changes_file}" | write_log
+            else
+              echo "Error: Could not verify GPG signature for ${dsc_file} and ${changes_file}" | write_log
+              exit 1
+            fi
           fi
 
           echo "Successfully built and signed Debian package ${package} ${codename}-${arch}" | write_log
-
         done
       done
     done
