@@ -559,7 +559,6 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     -u|--update)
       update_chroots
-      shift
       ;;
     -d|--download)
       download_source "$1"
@@ -571,11 +570,9 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     -b|--build)
       build_packages
-      shift
       ;;
     -s|--sync)
       sync_repository
-      shift
       ;;
     *)
       echo "Unknown command line argument."
